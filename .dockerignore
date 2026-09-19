@@ -1,0 +1,31 @@
+# .dockerignore —— 构建上下文瘦身，与 .gitignore 对齐。
+# 目的：CI / 本地 docker build 不把运行时数据、依赖目录、仓库元数据送进构建上下文。
+# 注意：internal/webui/dist 下只忽略 assets/（Dockerfile 的 web 阶段会重新生成），
+#       保留 dist/index.html 占位文件，否则 Dockerfile 里的 COPY 会因目录不存在而失败。
+
+# 仓库与编辑器元数据
+.git/
+.github/
+.gitignore
+.dockerignore
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 运行时数据：账号凭证、配置备份、面板登录凭据（绝不能进镜像）
+data/
+config.json
+testenv/
+shots/
+.chrome-profile/
+shot.sh
+
+# 前端依赖与构建产物：由 Dockerfile 的 web 阶段自行 npm ci + build
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo
+internal/webui/dist/assets/
+
+# 本地编译产物
+wbgui

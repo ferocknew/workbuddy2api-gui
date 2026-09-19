@@ -1,0 +1,98 @@
+# build.yml 打包发布 ghcr.io 多架构镜像 + amd64 离线 tar.gz artifact。
+#
+# 与 workbuddy2api 网关仓库的 build.yml 保持同一套路：
+#   - ghcr.io 镜像（linux/amd64 + linux/arm64），NAS / 服务器 docker pull 直接用；
+#   - 额外导出一份 amd64 离线 tar.gz，拉不到 ghcr 的内网环境 docker load 即可。
+#
+# 触发方式：
+#   - 手动 workflow_dispatch（想随时出包）
+#   - push 到 master（持续出 latest）
+#   - push 版本 tag（额外打出该版本号标签）
+#
+# tag 两种写法都认：`1.2.3` 与 `v1.2.3`，产出的镜像标签与程序内版本号一律是 1.2.3（不带 v）。
+name: Build & Publish
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    tags: ['v*', '[0-9]*']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-qemu 必须在 setup-buildx 之前：buildx 多架构依赖 QEMU 跨平台模拟。
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 镜像名与版本号一起算出来。
+      # ghcr 镜像名必须全小写，故用 ${GITHUB_REPOSITORY,,} 转小写；
+      # 版本号去掉 tag 的 v 前缀（v1.2.3 → 1.2.3），非 tag 构建用 dev-<短SHA>，
+      # 这个值经 Dockerfile 的 --build-arg VERSION 注入 main.version，「系统」页能看到。
+      - name: Compute image name, tags and version
+        id: meta
+        run: |
+          IMG="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="dev-${GITHUB_SHA::7}"
+          fi
+          {
+            echo "image=${IMG}"
+            echo "version=${VER}"
+            echo "tags<<EOF"
+            echo "${IMG}:latest"
+            echo "${IMG}:${GITHUB_SHA}"
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              echo "${IMG}:${VER}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push multi-arch
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 额外导出 amd64 离线 tar.gz：NAS / 内网拉不到 ghcr 时用 artifact 部署。
+      # 复用上面写进 gha 的构建缓存，这一步基本只做导出，不重新编译。
+      - name: Export offline tarball (amd64)
+        run: |
+          docker buildx build --platform linux/amd64 --file Dockerfile \
+            --build-arg VERSION=${{ steps.meta.outputs.version }} \
+            --tag workbuddy2api-gui:offline \
+            --cache-from type=gha \
+            --output type=docker,dest=workbuddy2api-gui-amd64.tar .
+          gzip -f workbuddy2api-gui-amd64.tar
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbuddy2api-gui-amd64
+          path: workbuddy2api-gui-amd64.tar.gz
+          if-no-files-found: error
